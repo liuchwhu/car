@@ -9,6 +9,10 @@ Scaffold a Python project for a self-driving RC car built on a Jetson Nano + Tam
 - **Power**: Jetson Nano requires 5V/2-4A — needs a BEC or separate 5V regulator from the 2S pack (do NOT power Jetson directly from 7.4V)
 - **Speed**: 2S keeps top speed moderate, which is ideal for autonomous driving development
 - **Servo limits**: The steering servo has physical angle limits — it cannot turn beyond a certain angle in each direction. These limits must be discovered during calibration and enforced in software (clamping) to prevent servo damage. The limits are saved as `steering_max_left` and `steering_max_right` in the calibration output file.
+- **I2C bus**: PCA9685 is on **I2C Bus 0** — Jetson Nano pins 27 (SDA) and 28 (SCL), which map to `board.SCL_1` / `board.SDA_1` in CircuitPython. Must use `busio.I2C(board.SCL_1, board.SDA_1)` (not the default bus).
+- **PCA9685 channel mapping**: Channel 0 = steering servo (position control, 0-180°). Channel 1 = ESC/throttle (continuous servo mode, throttle -1.0 to 1.0).
+- **Steering range**: Software-limited to ~30°-150° (from servoPlay.py). Exact limits to be refined during auto-calibration.
+- **Jetson access**: `ssh lc@192.168.1.233` — credentials in `.env` (gitignored)
 
 ## Project Structure
 
@@ -116,7 +120,7 @@ pilotnano/
 
 1. **`pyproject.toml`** — Project packaging with PEP 621 metadata. Defines `pilotnano` as the console entry point. Core dependencies: numpy, opencv-python, omegaconf, pyrealsense2, adafruit-circuitpython-servokit, onnxruntime.
 
-2. **`configs/`** — YAML files for every tunable parameter. `default.yaml` sets the main loop rate (20Hz), log level, and references which hardware sub-config to use. `hardware/jetson.yaml` holds RealSense resolution/FPS, PCA9685 I2C address, servo/ESC channel numbers, PWM microsecond ranges (1000-2000μs), steering trim offset, and 2S-specific throttle limits. `hardware/mock.yaml` mirrors the same keys but with `type: mock`.
+2. **`configs/`** — YAML files for every tunable parameter. `default.yaml` sets the main loop rate (20Hz), log level, and references which hardware sub-config to use. `hardware/jetson.yaml` holds RealSense resolution/FPS, PCA9685 I2C bus (bus 0: `SCL_1`/`SDA_1`), servo/ESC channel numbers (ch0=steering, ch1=ESC), PWM microsecond ranges (1000-2000μs), steering trim offset, steering angle range (default 30°-150°), and 2S-specific throttle limits. `hardware/mock.yaml` mirrors the same keys but with `type: mock`.
 
 3. **`src/pilotnano/config.py`** — A single `load_config()` function that uses OmegaConf to load `default.yaml`, then merges the referenced hardware sub-config on top, then applies any CLI dot-notation overrides (e.g., `hardware.actuator.steering_trim=0.05`). No framework magic — just explicit `OmegaConf.load()` and `OmegaConf.merge()` calls.
 
