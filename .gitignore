@@ -6,3 +6,4 @@ dist/
 build/
 .venv/
 configs/calibration/calibration_result.yaml
+configs/calibration/calibration_report.json

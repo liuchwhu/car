@@ -1,0 +1,21 @@
+detector:
+  model_path: models/yolo-nano.onnx
+  target_class: person
+  confidence_threshold: 0.5
+  input_size: [416, 416]
+
+follow:
+  target_distance: 1.5      # meters — desired distance to target
+  max_throttle: 0.4          # cap speed while following
+  lost_target_policy: stop   # stop | search | last_known
+  lost_target_timeout: 3.0   # seconds before giving up search
+
+pid_steering:
+  kp: 0.8
+  ki: 0.0
+  kd: 0.1
+
+pid_throttle:
+  kp: 0.5
+  ki: 0.05
+  kd: 0.1

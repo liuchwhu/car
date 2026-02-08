@@ -1,0 +1,21 @@
+emergency_stop:
+  distance: 0.20            # meters — stop if anything closer
+  resume_distance: 0.35     # meters — resume when clear
+
+obstacle_avoidance:
+  trigger_distance: 1.0     # meters — start steering away
+  steer_gain: 0.8           # how aggressively to steer (0-1)
+
+recovery:
+  stuck_timeout: 1.0        # seconds of no progress before triggering
+  depth_change_threshold: 0.05  # meters — min depth change to count as "moving"
+  reverse_duration: 1.0     # seconds to reverse
+  reverse_throttle: -0.3
+  turn_duration: 0.5        # seconds to turn
+  turn_throttle: 0.2
+
+depth_analyzer:
+  min_valid_depth: 0.1      # meters — ignore closer (noise)
+  max_valid_depth: 10.0     # meters — ignore further
+  roi_top: 0.3              # fraction of image — ignore top 30% (sky/ceiling)
+  roi_bottom: 1.0

@@ -1,0 +1,9 @@
+loop_hz: 20
+log_level: INFO
+
+hardware: hardware/jetson.yaml
+behavior: behavior/default.yaml
+calibration: calibration/default.yaml
+
+wander:
+  throttle: 0.3

@@ -1,0 +1,22 @@
+result_file: configs/calibration/calibration_result.yaml
+
+steering_trim:
+  test_throttle: 0.15         # gentle forward speed during trim test
+  test_duration: 1.0          # seconds per trim test
+  max_iterations: 10          # convergence limit
+  tolerance: 0.02             # acceptable drift (normalized flow)
+
+steering_curve:
+  test_throttle: 0.15
+  step_duration: 0.5          # seconds at each steering value
+  steps: [-1.0, -0.6, -0.2, 0.0, 0.2, 0.6, 1.0]
+
+steering_limits:
+  sweep_speed: 0.05           # how fast to sweep toward limits (normalized/frame)
+  stall_threshold: 0.01       # min optical flow to count as "still turning"
+  stall_frames: 5             # frames below threshold = limit found
+
+throttle_curve:
+  target_distance: 3.0        # meters — start distance from wall
+  test_duration: 1.0          # seconds at each throttle value
+  steps: [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]

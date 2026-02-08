@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pilotnano"
+version = "0.1.0"
+description = "Self-driving RC car on Jetson Nano + Tamiya XV-02"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "omegaconf>=2.3",
+    "pygame",
+]
+
+[project.optional-dependencies]
+jetson = [
+    "pyrealsense2",
+    "adafruit-circuitpython-servokit",
+    "board",
+    "busio",
+]
+inference = [
+    "onnxruntime",
+]
+train = [
+    "torch",
+    "torchvision",
+    "onnx",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+pilotnano = "pilotnano.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

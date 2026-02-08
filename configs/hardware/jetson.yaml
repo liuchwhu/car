@@ -1,0 +1,21 @@
+camera:
+  type: realsense
+  width: 640
+  height: 480
+  fps: 30
+  enable_depth: true
+  align_depth: true
+
+actuator:
+  type: pca9685
+  i2c_bus: 0                    # Bus 0: board.SCL_1 / board.SDA_1 (pins 27, 28)
+  i2c_address: 0x40
+  steering_channel: 0           # PCA9685 channel 0 = steering servo
+  throttle_channel: 1           # PCA9685 channel 1 = ESC (continuous servo)
+  steering_min_pulse: 1000      # microseconds
+  steering_max_pulse: 2000
+  steering_min_angle: 30        # degrees — software limit (left)
+  steering_max_angle: 150       # degrees — software limit (right)
+  steering_center_angle: 90     # degrees — straight ahead
+  steering_trim: 0.0            # normalized offset, updated by calibration
+  throttle_max: 0.4             # cap for safety during development
