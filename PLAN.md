@@ -1,38 +1,42 @@
 # PilotNano - Self-Driving RC Car Project Scaffold
 
 ## Context
-Scaffold a Python project for a self-driving RC car built on a Jetson Nano + Tamiya XV-02 chassis with PCA9685 PWM driver and Intel RealSense D435 camera. The project should support behavioral cloning (collect data, train, drive autonomously) and be structured to grow into a modular perception-planning-control pipeline. A lightweight message bus abstracts communication so ROS2 can be swapped in later.
+Scaffold a Python project for a self-driving RC car built on a Jetson Nano + Tamiya XV-02 chassis with PCA9685 PWM driver and Intel RealSense D435 camera. The project focuses on algorithmic autonomous driving — obstacle avoidance and object following using depth perception — with a behavior manager providing safety and decision arbitration. A lightweight message bus abstracts communication so ROS2 can be swapped in later.
 
 ## Hardware Notes
 - **Battery**: 2S LiPo (7.4V nominal, 8.4V fully charged)
 - **ESC**: Must be calibrated for 2S voltage range; throttle PWM mapping should account for lower voltage/speed ceiling
 - **Power**: Jetson Nano requires 5V/2-4A — needs a BEC or separate 5V regulator from the 2S pack (do NOT power Jetson directly from 7.4V)
 - **Speed**: 2S keeps top speed moderate, which is ideal for autonomous driving development
+- **Servo limits**: The steering servo has physical angle limits — it cannot turn beyond a certain angle in each direction. These limits must be discovered during calibration and enforced in software (clamping) to prevent servo damage. The limits are saved as `steering_max_left` and `steering_max_right` in the calibration output file.
 
 ## Project Structure
 
 ```
 pilotnano/
-├── pyproject.toml                    # PEP 621, console entry point, optional [train] deps
-├── Makefile                          # dev shortcuts (test, lint, export)
+├── pyproject.toml                    # PEP 621, console entry point
+├── Makefile                          # dev shortcuts (test, lint)
 ├── configs/
 │   ├── default.yaml                  # top-level: loop_hz, log_level, sub-config refs
 │   ├── hardware/
 │   │   ├── jetson.yaml               # RealSense + PCA9685 settings (pins, PWM ranges, trim)
 │   │   └── mock.yaml                 # Mock camera/actuator for desktop dev
-│   ├── model/
-│   │   └── pilotnet.yaml             # input_shape, lr, epochs, batch_size
-│   └── collection/
-│       └── default.yaml              # output_dir, image format, save_depth flag
+│   ├── behavior/
+│   │   └── default.yaml              # e-stop distance, stuck timeout, recovery maneuver params
+│   ├── calibration/
+│   │   ├── default.yaml              # auto-cal speeds, durations, tolerances
+│   │   └── calibration_result.yaml   # auto-generated: saved calibration constants (do not edit)
+│   └── follow/
+│       └── default.yaml              # target class, follow distance, PID gains, lost-target policy
 ├── src/pilotnano/
 │   ├── __init__.py
 │   ├── app.py                        # CLI entry point, mode switching, main loop @ loop_hz
-│   ├── config.py                     # OmegaConf load + merge (default → hardware → model → CLI)
+│   ├── config.py                     # OmegaConf load + merge (default → hardware → CLI)
 │   ├── bus/
 │   │   ├── __init__.py
 │   │   ├── base.py                   # MessageBus ABC (publish, subscribe, unsubscribe)
 │   │   ├── local.py                  # LocalBus: synchronous in-process dict[topic]→callbacks
-│   │   └── messages.py               # Dataclasses: CameraFrame, ControlCommand, ModelOutput + topic constants
+│   │   └── messages.py               # Dataclasses: CameraFrame, ControlCommand + topic constants
 │   ├── hardware/
 │   │   ├── __init__.py               # Factory: create_camera(), create_actuator()
 │   │   ├── base.py                   # Camera ABC (start/read/stop), Actuator ABC (start/send/stop)
@@ -43,40 +47,48 @@ pilotnano/
 │   │   ├── __init__.py               # Factory: create_mode()
 │   │   ├── base.py                   # DrivingMode ABC (start/step/stop)
 │   │   ├── manual.py                 # Display camera feed, car driven by RC remote directly
-│   │   ├── collect.py                # Gamepad→actuator + recorder (camera frame + labels to disk)
-│   │   └── autopilot.py              # Camera→preprocess→inference→actuator
+│   │   ├── wander.py                 # Autonomous wandering: drive forward + obstacle avoidance
+│   │   └── follow.py                 # Object following: detect target, PID to follow at distance
+│   ├── behavior/
+│   │   ├── __init__.py
+│   │   ├── manager.py                # BehaviorManager: priority-based behavior arbitration
+│   │   ├── base.py                   # Behavior ABC (evaluate → ControlCommand | None)
+│   │   ├── emergency_stop.py         # Depth < threshold → full stop (highest priority)
+│   │   ├── obstacle_avoidance.py     # Steer toward open space when obstacle within range
+│   │   ├── recovery.py               # Stuck detection → reverse+turn state machine
+│   │   └── passthrough.py            # Forwards the active mode's command (lowest priority)
 │   ├── perception/
 │   │   ├── __init__.py
-│   │   └── preprocessor.py           # Crop, resize(200x66), normalize, BGR→RGB, HWC→CHW
-│   ├── model/
-│   │   ├── __init__.py
-│   │   ├── pilotnet.py               # PilotNet CNN (PyTorch): 5 conv + 4 FC → (steering, throttle)
-│   │   └── export.py                 # torch.onnx.export helper
+│   │   ├── depth_analyzer.py         # Depth map → obstacle zones (left/center/right distances)
+│   │   └── object_detector.py        # YOLO/MobileNet-SSD via ONNX Runtime → bounding boxes
 │   ├── inference/
 │   │   ├── __init__.py
 │   │   └── engine.py                 # ONNX Runtime session (auto-selects TensorRT>CUDA>CPU)
-│   ├── data/
+│   ├── control/
 │   │   ├── __init__.py
-│   │   ├── recorder.py               # Writes frames/*.jpg + labels.csv per run
-│   │   ├── dataset.py                # PyTorch Dataset loading recorded runs
-│   │   └── augmentation.py           # Horizontal flip, brightness, shadow, translation
+│   │   └── pid.py                    # PID controller for steering and throttle
+│   ├── calibration/
+│   │   ├── __init__.py
+│   │   ├── auto_calibrator.py        # Orchestrates all auto-calibration routines
+│   │   ├── steering_calibrator.py    # Auto steering trim + steering-to-turn-rate curve
+│   │   ├── throttle_calibrator.py    # Auto throttle-to-speed curve via depth deltas
+│   │   └── motion_estimator.py       # Optical flow + depth deltas → actual velocity/turn rate
 │   └── utils/
 │       ├── __init__.py
 │       └── logging.py                # Logging config
 ├── scripts/
-│   ├── train.py                      # Offline training (runs on workstation, not Jetson)
-│   ├── export_onnx.py                # Checkpoint → ONNX export
-│   ├── visualize_data.py             # Browse frames with steering/throttle overlay
-│   └── calibrate.py                  # Interactive servo/ESC range calibration
+│   └── calibrate.py                  # Interactive + auto-calibration CLI
 ├── tests/
 │   ├── conftest.py                   # Fixtures: mock_camera, mock_actuator, local_bus, sample_cfg
 │   ├── test_bus.py
 │   ├── test_hardware_mock.py
-│   ├── test_recorder.py
-│   ├── test_model.py
-│   └── test_inference.py
-└── notebooks/
-    └── explore_data.ipynb
+│   ├── test_behavior.py
+│   ├── test_depth_analyzer.py
+│   ├── test_pid.py
+│   ├── test_object_detector.py
+│   └── test_calibration.py
+└── models/
+    └── .gitkeep                      # Place pretrained ONNX models here (yolo-nano.onnx, etc.)
 ```
 
 ## Key Design Decisions
@@ -85,10 +97,10 @@ pilotnano/
 |----------|--------|-----|
 | Config library | OmegaConf (not Hydra) | Lighter, no CLI magic needed, same YAML merge |
 | Message bus | Synchronous LocalBus | 20Hz loop fits in 50ms budget; async adds complexity with no benefit now |
-| Data format | JPG images + CSV labels | Human-browsable, debuggable, small dataset volumes |
-| Model | PilotNet (DAVE-2 variant) | Proven for RC cars, tiny enough for Jetson Nano |
+| Behavior safety | Priority-based behavior manager | Always-on safety layer between decision-making and actuators; prevents crashes regardless of driving mode |
+| Object detection | Pretrained YOLO-Nano or MobileNet-SSD (ONNX) | No custom training needed — download a pretrained model, convert to ONNX, deploy |
 | Inference | ONNX Runtime (auto provider) | Portable across Jetson (TensorRT EP) and desktop (CPU) |
-| Actuator control | Gamepad for collect mode | Simpler than reading RC PWM; software controls PCA9685 directly |
+| Control | PID controllers | Simple, tunable, no ML needed — appropriate for following and steering tasks |
 
 ---
 
@@ -102,17 +114,17 @@ pilotnano/
 
 **What we build**:
 
-1. **`pyproject.toml`** — Project packaging with PEP 621 metadata. Defines `pilotnano` as the console entry point. Core dependencies (numpy, opencv, omegaconf, pyrealsense2, servokit, onnxruntime) go in `[dependencies]`. Training-only libraries (torch, torchvision, onnx, matplotlib, tqdm) go in `[project.optional-dependencies.train]` so the Jetson doesn't need to install them.
+1. **`pyproject.toml`** — Project packaging with PEP 621 metadata. Defines `pilotnano` as the console entry point. Core dependencies: numpy, opencv-python, omegaconf, pyrealsense2, adafruit-circuitpython-servokit, onnxruntime.
 
-2. **`configs/`** — YAML files for every tunable parameter. `default.yaml` sets the main loop rate (20Hz), log level, and references which hardware/model/collection sub-config to use. `hardware/jetson.yaml` holds RealSense resolution/FPS, PCA9685 I2C address, servo/ESC channel numbers, PWM microsecond ranges (1000-2000μs), steering trim offset, and 2S-specific throttle limits. `hardware/mock.yaml` mirrors the same keys but with `type: mock`. `model/pilotnet.yaml` defines input shape (3x66x200), learning rate, batch size, epochs. `collection/default.yaml` sets output directory, image format (jpg), and whether to save depth frames.
+2. **`configs/`** — YAML files for every tunable parameter. `default.yaml` sets the main loop rate (20Hz), log level, and references which hardware sub-config to use. `hardware/jetson.yaml` holds RealSense resolution/FPS, PCA9685 I2C address, servo/ESC channel numbers, PWM microsecond ranges (1000-2000μs), steering trim offset, and 2S-specific throttle limits. `hardware/mock.yaml` mirrors the same keys but with `type: mock`.
 
-3. **`src/pilotnano/config.py`** — A single `load_config()` function that uses OmegaConf to load `default.yaml`, then merges the referenced hardware/model/collection sub-configs on top, then applies any CLI dot-notation overrides (e.g., `hardware.actuator.steering_trim=0.05`). No framework magic — just explicit `OmegaConf.load()` and `OmegaConf.merge()` calls.
+3. **`src/pilotnano/config.py`** — A single `load_config()` function that uses OmegaConf to load `default.yaml`, then merges the referenced hardware sub-config on top, then applies any CLI dot-notation overrides (e.g., `hardware.actuator.steering_trim=0.05`). No framework magic — just explicit `OmegaConf.load()` and `OmegaConf.merge()` calls.
 
-4. **`src/pilotnano/bus/`** — The message bus abstraction. `messages.py` defines dataclasses (`CameraFrame`, `ControlCommand`, `ModelOutput`) and string topic constants (`"camera/frame"`, `"control/command"`, etc.) using ROS2-style naming so a future `ROS2Bus` can map them 1:1. `base.py` defines the `MessageBus` ABC with `publish()`, `subscribe()`, and `unsubscribe()`. `local.py` implements `LocalBus` — a synchronous in-process pub/sub using `dict[str, list[Callable]]`. When you `publish()`, it calls all subscribers sequentially in the caller's thread. No threading, no queues — the 20Hz main loop is our only scheduler.
+4. **`src/pilotnano/bus/`** — The message bus abstraction. `messages.py` defines dataclasses (`CameraFrame`, `ControlCommand`) and string topic constants (`"camera/frame"`, `"control/command"`, etc.) using ROS2-style naming so a future `ROS2Bus` can map them 1:1. `base.py` defines the `MessageBus` ABC with `publish()`, `subscribe()`, and `unsubscribe()`. `local.py` implements `LocalBus` — a synchronous in-process pub/sub using `dict[str, list[Callable]]`. When you `publish()`, it calls all subscribers sequentially in the caller's thread. No threading, no queues — the 20Hz main loop is our only scheduler.
 
 5. **`src/pilotnano/hardware/base.py`** — Abstract base classes for `Camera` (start/read/stop, returns `CameraFrame`) and `Actuator` (start/send/stop, accepts `ControlCommand`). Both support context manager (`with camera:` / `with actuator:`). These interfaces are the contract — every real and mock implementation must follow them.
 
-6. **`src/pilotnano/hardware/mock.py`** — `MockCamera` returns synthetic frames (solid color gradient with a frame counter overlay). `MockActuator` logs commands to stdout and stores them in a list (useful for test assertions). These let us run the full pipeline on a laptop.
+6. **`src/pilotnano/hardware/mock.py`** — `MockCamera` returns synthetic frames (solid color gradient with a frame counter overlay, includes a fake depth map with configurable obstacle placement). `MockActuator` logs commands to stdout and stores them in a list (useful for test assertions). These let us run the full pipeline on a laptop.
 
 7. **`src/pilotnano/hardware/__init__.py`** — Factory functions `create_camera(cfg)` and `create_actuator(cfg)` that read `cfg.camera.type` / `cfg.actuator.type` and return the right concrete class. Simple `if/elif` — two implementations don't justify a plugin registry.
 
@@ -126,7 +138,7 @@ pilotnano/
 
 **Goal**: Wire up the entry point and make the car's actual hardware respond. After this phase, you can SSH into the Jetson, run `pilotnano --mode manual`, and see live RealSense RGB+depth on screen while the servo/ESC are ready to accept commands.
 
-**Why now**: Phase 1 gave us interfaces and mocks. Now we write the real implementations and the main app that ties everything together. We do this before data collection because we need to verify the hardware works before trusting it to record training data.
+**Why now**: Phase 1 gave us interfaces and mocks. Now we write the real implementations and the main app that ties everything together. We do this before the behavior manager because we need to verify the hardware works before building safety logic on top of it.
 
 **What we build**:
 
@@ -134,75 +146,212 @@ pilotnano/
 
 10. **`src/pilotnano/hardware/realsense.py`** — `RealSenseCamera` wraps the `pyrealsense2` pipeline. `start()` configures and enables RGB + depth streams at the resolution/FPS from config, optionally creates an `rs.align` object to align depth frames to the RGB frame. `read()` calls `pipeline.wait_for_frames()`, extracts numpy arrays, and returns a `CameraFrame`. `stop()` cleanly shuts down the pipeline. Handles USB 3.0 vs 2.0 gracefully (logs a warning if bandwidth is limited).
 
-11. **`src/pilotnano/hardware/pca9685.py`** — `PCA9685Actuator` wraps Adafruit ServoKit. `start()` initializes `ServoKit(channels=16, address=cfg.i2c_address)` and configures pulse width ranges from config (important for 2S ESC calibration). `send()` maps normalized steering [-1, 1] to servo angle and throttle [-1, 1] to ESC pulse width, applying the steering trim offset from config. `stop()` sends a neutral command (steering center, throttle zero) as a safety measure.
+11. **`src/pilotnano/hardware/pca9685.py`** — `PCA9685Actuator` wraps Adafruit ServoKit. `start()` initializes `ServoKit(channels=16, address=cfg.i2c_address)`, configures pulse width ranges from config, and loads the saved calibration file (`configs/calibration/calibration_result.yaml`) if it exists — this provides steering trim, steering limits, and throttle/steering lookup curves. `send()` maps normalized steering [-1, 1] to servo angle and throttle [-1, 1] to ESC pulse width, applying the steering trim offset and **clamping steering to the discovered physical limits** (`steering_max_left`, `steering_max_right`) to prevent servo damage. If calibration curves are available, it translates desired physical units (speed, turn rate) into correct PWM values. `stop()` sends a neutral command (steering center, throttle zero) as a safety measure.
 
 12. **`src/pilotnano/utils/logging.py`** — Sets up Python `logging` with a consistent format showing timestamp, level, and module name. Reads `log_level` from config.
 
-**Milestone**: On the Jetson with everything wired up, `pilotnano --mode manual` shows live camera feed. Running `scripts/calibrate.py` (placeholder — will be fleshed out in Phase 3) lets you verify the servo sweeps left-right and the ESC responds.
+13. **`scripts/calibrate.py`** — Interactive CLI tool for servo and ESC calibration. Walks you through: setting steering left/center/right positions (maps physical limits to PWM values), arming the ESC (2S-specific procedure: neutral → full throttle → neutral), and setting throttle range. Writes the calibrated values to a YAML file that can be referenced from the main config. This is essential for the 2S setup since PWM ranges vary between ESCs.
+
+**Milestone**: On the Jetson with everything wired up, `pilotnano --mode manual` shows live camera feed. Running `scripts/calibrate.py` in manual mode verifies the servo sweeps left-right and the ESC responds.
 
 ---
 
-### Phase 3: Data Collection
+### Phase 3: Auto-Calibration
 
-**Goal**: Enable the core training data workflow — drive the car manually with a gamepad while the system records synchronized camera frames and steering/throttle labels to disk. After this phase, you can do laps around a track and build up a dataset.
+**Goal**: Use the D435 camera as a measurement instrument to automatically calibrate the car's steering and throttle. After this phase, the car knows exactly what steering angle produces what turn rate, and what throttle value produces what speed — no guesswork, no manual tuning.
 
-**Why now**: You can't train a model without data. Data collection is the most important capability for behavioral cloning. We build it early so you can start accumulating driving data while we work on the training pipeline.
+**Why now**: Accurate calibration is essential for the PID controllers in object following (Phase 5). Without it, `steering=0.5` is a meaningless number — we don't know if it produces a gentle curve or a sharp turn. Auto-calibration turns arbitrary PWM values into physically meaningful units (degrees/second, meters/second). It also eliminates the tedious manual calibration step — the car calibrates itself in ~30 seconds.
 
 **What we build**:
 
-13. **`src/pilotnano/data/recorder.py`** — `Recorder` writes synchronized data to disk. Each recording session creates a timestamped directory (e.g., `data/runs/2025-01-15_14-30-00/`) containing a `frames/` subdirectory with numbered `000000_rgb.jpg` (and optionally `000000_depth.npz`) files, a `labels.csv` with columns `frame_id,timestamp,steering,throttle`, and a `metadata.json` with the config snapshot, start time, and frame count. JPG format keeps file sizes manageable (~30KB per frame at 640x480). CSV labels are human-readable and trivially loadable with numpy or pandas.
+14. **`src/pilotnano/calibration/motion_estimator.py`** — `MotionEstimator` measures the car's actual motion using the D435. Two methods:
+- **Speed from depth**: When facing a wall/surface, measure the rate of change of center depth between frames. `speed = Δdepth / Δtime`. Accurate to ~1cm at D435 ranges.
+- **Turn rate from optical flow**: Compute sparse optical flow (OpenCV `calcOpticalFlowPyrLK`) between consecutive RGB frames. The dominant horizontal flow direction and magnitude indicate the car's yaw rate. When driving forward, lateral flow asymmetry indicates steering bias (drift).
+- Both methods work without any additional sensors — the D435 is the only instrument needed.
 
-14. **`src/pilotnano/modes/collect.py`** — `CollectMode` is the data collection driving mode. Each `step()`: reads the gamepad (via pygame joystick API), maps stick axes to a `ControlCommand` (left stick horizontal → steering, right trigger → throttle), sends the command to the actuator (so you're physically driving the car through the PCA9685), reads a camera frame, and passes both to the `Recorder`. The gamepad simultaneously controls the car and provides the training labels — this is the key insight that makes behavioral cloning simple. A button on the gamepad toggles recording on/off so you can skip bad segments.
+15. **`src/pilotnano/calibration/steering_calibrator.py`** — `SteeringCalibrator` runs two auto-calibration routines:
+- **Trim calibration**: Drives forward slowly at a wall (`throttle=0.15`, `steering=0.0`). Measures drift via optical flow — if the scene shifts right, the car is drifting left. Adjusts `steering_trim` in small increments, re-tests, converges on the trim value that produces straight-line driving. Takes ~10 seconds, 3-5 iterations.
+- **Steering curve**: Sweeps through steering values (-1.0 to 1.0 in steps of 0.2) while driving slowly forward. At each value, measures the actual turn rate from optical flow. Builds a lookup table `{commanded_steering: actual_turn_rate_deg_per_sec}`. This lets the PID convert a desired turn rate into the correct steering command. Takes ~20 seconds.
 
-15. **`scripts/calibrate.py`** — Interactive CLI tool for servo and ESC calibration. Walks you through: setting steering left/center/right positions (maps physical limits to PWM values), arming the ESC (2S-specific procedure: neutral → full throttle → neutral), and setting throttle range. Writes the calibrated values to a YAML file that can be referenced from the main config. This is essential for the 2S setup since PWM ranges vary between ESCs.
+16. **`src/pilotnano/calibration/throttle_calibrator.py`** — `ThrottleCalibrator` measures actual speed at different throttle values:
+- Faces a flat surface (wall) from ~3 meters. Commands a throttle value for 1 second, measures approach speed from depth deltas. Stops, reverses to starting position. Repeats at different throttle values (0.1, 0.2, 0.3, ... up to max safe speed).
+- Builds a lookup table `{commanded_throttle: actual_speed_m_per_sec}`. This lets the PID command real speeds instead of arbitrary throttle values.
+- Also measures the ESC's dead zone (minimum throttle that actually produces motion — important for 2S where it might be higher than expected).
+- Takes ~30 seconds.
 
-**Milestone**: Drive the XV-02 around a track with a gamepad, see `data/runs/<timestamp>/` fill up with images and a labels.csv. Inspect the data with `ls` and a CSV viewer to confirm steering/throttle values look correct.
+17. **`src/pilotnano/calibration/auto_calibrator.py`** — `AutoCalibrator` orchestrates all calibration routines in sequence. Runs as `pilotnano --mode calibrate` or `scripts/calibrate.py --auto`. Sequence:
+1. Check for existing calibration file (`configs/calibration/calibration_result.yaml`). If it exists and is valid, skip calibration and log "Using saved calibration from <timestamp>". Use `--force-calibrate` flag to override.
+2. Steering trim calibration → measures `steering_trim`.
+3. Steering curve calibration → measures lookup table `{commanded_steering: actual_turn_rate_deg_per_sec}`.
+4. Steering limit discovery → slowly sweeps steering toward each extreme, detects physical limit by monitoring servo current draw or depth-based motion stall. Saves `steering_max_left` and `steering_max_right` (the usable range, not the servo's full range). These limits are enforced as clamps in `PCA9685Actuator.send()`.
+5. Throttle speed calibration → measures lookup table `{commanded_throttle: actual_speed_m_per_sec}`.
+6. Saves ALL results to `configs/calibration/calibration_result.yaml` — a single persistent file containing steering_trim, steering_curve, steering_limits, throttle_curve, ESC dead zone, and a timestamp. This file is loaded by `PCA9685Actuator` at startup.
+7. Writes a human-readable `calibration_report.json` with all measured values and pass/fail status.
+- **Persistent calibration**: The result file is saved once and reused on every subsequent run. No need to re-calibrate every time you start the car. Re-run calibration only when something changes (new tires, different surface, battery type).
+- The lookup tables are loaded by `PCA9685Actuator` at startup and used to translate desired physical values (turn rate, speed) into the correct PWM commands.
+
+18. **`configs/calibration/default.yaml`** — Configuration for auto-calibration:
+```yaml
+steering_trim:
+  test_throttle: 0.15       # gentle forward speed during trim test
+  test_duration: 1.0        # seconds per trim test
+  max_iterations: 10        # convergence limit
+  tolerance: 0.02           # acceptable drift (normalized flow)
+steering_curve:
+  test_throttle: 0.15
+  step_duration: 0.5        # seconds at each steering value
+  steps: [-1.0, -0.6, -0.2, 0.0, 0.2, 0.6, 1.0]
+throttle_curve:
+  target_distance: 3.0      # meters — start distance from wall
+  test_duration: 1.0        # seconds at each throttle value
+  steps: [0.1, 0.15, 0.2, 0.25, 0.3, 0.4]
+```
+
+**Milestone**: Place the car 3 meters from a wall. Run `pilotnano --mode calibrate`. The car automatically: discovers its steering limits, finds its steering trim, sweeps steering values to build a turn-rate curve, tests throttle values to build a speed curve. All results are saved to `configs/calibration/calibration_result.yaml`. On the next startup, the car loads the saved calibration instantly — no re-calibration needed. Use `--force-calibrate` to re-run if hardware changes. Subsequent modes (wander, follow) use these curves for accurate control.
 
 ---
 
-### Phase 4: Model + Training Pipeline
+### Phase 4: Behavior Manager + Depth Perception
 
-**Goal**: Build the neural network and the training pipeline so you can turn collected driving data into an autonomous driving model. After this phase, you can train a PilotNet model on your workstation and export it as an ONNX file ready for the Jetson.
+**Goal**: Build the safety and decision-arbitration layer that sits between any driving mode and the actuators. After this phase, the car has an always-on safety system: emergency stop when something is too close, and automatic recovery when stuck. Every driving mode routes through this layer.
 
-**Why now**: By this point you should have collected several recording sessions. The model and training pipeline transform that raw data into an autopilot. We build the preprocessor first because it's shared between training and inference — ensuring the model sees exactly the same image transformations at both stages.
+**Why now**: Before we enable any autonomous driving, we need a safety net. Building it now means every subsequent mode (wander, follow) gets safety for free. It also introduces the depth analyzer — the D435's key advantage over a regular webcam.
 
 **What we build**:
 
-16. **`src/pilotnano/perception/preprocessor.py`** — `Preprocessor` transforms raw 640x480 BGR camera frames into the tensor format the model expects. Pipeline: crop the top portion (removes sky/ceiling — irrelevant for an RC car on the ground), resize to 200x66 pixels (matching NVIDIA PilotNet input), convert BGR → RGB, normalize pixel values to [-1, 1], transpose HWC → CHW. All parameters (crop region, target size) come from config so they're easy to tune. This same class is used during both training and inference to guarantee consistency.
+19. **`src/pilotnano/perception/depth_analyzer.py`** — `DepthAnalyzer` processes the depth frame into actionable information. Divides the depth image into zones (left third, center third, right third), computes the minimum reliable distance in each zone (filtering out zero/invalid depth pixels), and returns a `DepthReport` dataclass with `left_dist`, `center_dist`, `right_dist`, and `closest_dist`. All thresholds and zone boundaries are configurable. This is the shared perception component that emergency stop, recovery, obstacle avoidance, and object following all build on.
 
-17. **`src/pilotnano/model/pilotnet.py`** — `PilotNet` is a PyTorch `nn.Module` implementing NVIDIA's DAVE-2 architecture, adapted for our RC car. Architecture: 5 convolutional layers (24→36→48→64→64 filters, mix of 5x5 and 3x3 kernels with strided convolutions for downsampling) followed by 4 fully connected layers (1152→100→50→10→2). Dropout (0.3) after the first two FC layers for regularization with small datasets. Output is 2 values: steering and throttle, passed through `tanh` to constrain to [-1, 1]. Total parameters: ~250K — tiny enough for real-time inference on Jetson Nano.
+20. **`src/pilotnano/behavior/base.py`** — `Behavior` ABC that all behaviors implement. Key method: `evaluate(frame: CameraFrame, depth_report: DepthReport, proposed_cmd: ControlCommand) -> ControlCommand | None`. Returns a `ControlCommand` to override the proposed action, or `None` to abstain (let lower-priority behaviors decide). Each behavior also has a `priority` (int, lower = higher priority) and a `name` for logging.
 
-18. **`src/pilotnano/model/export.py`** — Utility function `export_to_onnx()` that takes a trained PilotNet checkpoint and exports it to ONNX format using `torch.onnx.export()` with opset 11. Validates the exported model with `onnx.checker.check_model()`. This ONNX file is what gets deployed to the Jetson.
+21. **`src/pilotnano/behavior/emergency_stop.py`** — `EmergencyStopBehavior`. Highest priority. If `depth_report.closest_dist < e_stop_distance` (configurable, default 0.2m / ~8 inches), returns `ControlCommand(steering=0, throttle=0)` — full stop. Publishes an alert to the bus. This is a hard safety boundary that no other behavior can override. Uses a small hysteresis (resume threshold slightly higher than stop threshold) to prevent flickering.
 
-19. **`src/pilotnano/data/dataset.py`** — `PilotNetDataset` is a PyTorch `Dataset` that loads recorded runs. It scans run directories for `labels.csv` files, builds a flat list of `(image_path, steering, throttle)` tuples, and in `__getitem__` loads the image, applies augmentations (if training), applies the `Preprocessor` transform, and returns `(tensor, [steering, throttle])`. Supports optional filtering to reduce the over-representation of straight-line driving (a common problem in behavioral cloning datasets).
+22. **`src/pilotnano/behavior/recovery.py`** — `RecoveryBehavior`. Second priority. Implements a state machine for getting unstuck:
+- **MONITORING** → detects "stuck" condition: throttle has been positive but `depth_report.center_dist` hasn't changed for N consecutive frames (configurable, default 1 second / 20 frames). This catches situations where the car is pushing against a wall.
+- **REVERSING** → sends `throttle=-0.3` (gentle reverse) for a configurable duration (default 1 second).
+- **TURNING** → sends `steering=±1.0` (full lock toward the side with most depth clearance, determined from `depth_report.left_dist` vs `depth_report.right_dist`) + gentle forward throttle for a configurable duration (default 0.5 seconds).
+- **RESUMING** → returns to MONITORING, hands control back to the active driving mode.
+- All durations, throttle values, and thresholds are in `configs/behavior/default.yaml`.
 
-20. **`src/pilotnano/data/augmentation.py`** — `DrivingAugmentation` applies training-time data augmentations to increase dataset diversity and reduce overfitting. Augmentations: random horizontal flip (mirrors the image and negates the steering value), random brightness/contrast adjustment (simulates lighting changes), random shadow overlay (simulates partial shadows on the track), and small random horizontal translation (with proportional steering adjustment to teach recovery). Each augmentation has a configurable probability.
+23. **`src/pilotnano/behavior/passthrough.py`** — `PassthroughBehavior`. Lowest priority. Simply returns the `proposed_cmd` unchanged. This is the fallback — if no higher-priority behavior intervenes, the active mode's command goes through to the actuator.
 
-21. **`scripts/train.py`** — Offline training script that runs on a workstation with a GPU (not on the Jetson). Usage: `python scripts/train.py --data ./data/runs`. Loads config, discovers all runs, builds the dataset with train/val split (85/15), creates DataLoaders, instantiates PilotNet, and runs a training loop with MSE loss on (steering, throttle), Adam optimizer, and cosine LR schedule. Logs train/val loss per epoch, saves the best checkpoint by validation loss, and exports the best model to ONNX at the end.
+24. **`src/pilotnano/behavior/manager.py`** — `BehaviorManager` orchestrates the priority stack. Holds a sorted list of `Behavior` instances. On each tick, `process(frame, proposed_cmd) -> ControlCommand`:
+1. Runs `DepthAnalyzer` on the frame's depth data to get a `DepthReport`.
+2. Iterates through behaviors in priority order (highest first).
+3. The first behavior to return a non-`None` command wins — that command is sent to the actuator.
+4. Logs which behavior is currently in control (useful for debugging: "emergency_stop ACTIVE" vs "passthrough").
 
-**Milestone**: After collecting 10-20 minutes of driving data across several sessions, run `python scripts/train.py --data ./data/runs` on your workstation. Training converges in ~30 epochs, producing `best.onnx` (~1MB). Validation loss shows the model learned the steering/throttle mapping.
+The manager is instantiated in `app.py` and injected into all driving modes.
+
+25. **`configs/behavior/default.yaml`** — Configuration for all behavior parameters:
+```yaml
+emergency_stop:
+  distance: 0.20          # meters — stop if anything closer
+  resume_distance: 0.35   # meters — resume when clear
+obstacle_avoidance:
+  trigger_distance: 1.0   # meters — start steering away
+  steer_gain: 0.8         # how aggressively to steer (0-1)
+recovery:
+  stuck_timeout: 1.0      # seconds of no progress before triggering
+  reverse_duration: 1.0   # seconds to reverse
+  reverse_throttle: -0.3
+  turn_duration: 0.5      # seconds to turn
+  turn_throttle: 0.2
+```
+
+**Data flow with behavior manager**:
+```
+Camera → Active Mode (wander/follow) → proposed ControlCommand
+                                              │
+                                              ▼
+                                    BehaviorManager.process()
+                                              │
+              DepthAnalyzer ──► DepthReport ──┤
+                                              │
+              Priority stack:                 │
+              1. EmergencyStop (< 20cm)  ─────┤
+              2. Recovery (stuck?)       ─────┤
+              3. ObstacleAvoidance (< 1m) ────┤
+              4. Passthrough (use proposed) ──┤
+                                              │
+                                              ▼
+                                      Final ControlCommand → Actuator
+```
+
+**Milestone**: On the Jetson, push the car toward a wall — emergency stop kicks in. Test with mock hardware on laptop by simulating decreasing depth values.
 
 ---
 
-### Phase 5: Inference + Autopilot Mode
+### Phase 5: Obstacle Avoidance + Wander Mode
 
-**Goal**: Deploy the trained model to the Jetson and make the car drive itself. After this phase, you have a fully autonomous RC car running behavioral cloning.
+**Goal**: Make the car drive autonomously by wandering forward and steering around obstacles using depth data. No ML, no training data — just depth perception and reactive control. This is the first fully autonomous mode.
 
-**Why now**: We have all the pieces — the model, the preprocessing pipeline, the hardware drivers. This phase connects them into the autonomous driving loop: camera → preprocess → neural network → actuator.
+**Why now**: With the behavior manager and depth analyzer in place, obstacle avoidance is straightforward — it's just another behavior in the priority stack. The wander mode provides a simple "drive forward" policy that the behavior stack makes safe. This gives you an autonomous car with minimal complexity.
 
 **What we build**:
 
-22. **`src/pilotnano/inference/engine.py`** — `InferenceEngine` wraps an ONNX Runtime `InferenceSession`. On init, it auto-detects available execution providers and prefers TensorRT (fastest on Jetson) > CUDA > CPU. Loads the ONNX model, reads input/output tensor names from metadata. `predict()` takes a preprocessed numpy array, runs inference, and returns `(steering, throttle)`. On the Jetson Nano with TensorRT, inference takes ~5-10ms per frame — well within our 50ms (20Hz) budget.
+26. **`src/pilotnano/behavior/obstacle_avoidance.py`** — `ObstacleAvoidanceBehavior`. Third priority (after e-stop and recovery, before passthrough). When `depth_report.center_dist < trigger_distance` (configurable, default 1.0m), steers toward the side with more clearance: compares `left_dist` vs `right_dist`, produces a steering command proportional to the imbalance (controlled by `steer_gain`). Throttle is reduced proportionally to proximity — the closer the obstacle, the slower the car goes. If both sides are blocked, it returns `None` and lets recovery handle it (reverse + turn). This is the active avoidance layer — unlike emergency stop (which halts), this steers around obstacles while keeping the car moving.
 
-23. **`src/pilotnano/modes/autopilot.py`** — `AutopilotMode` is the autonomous driving mode. `start()` loads the `InferenceEngine` with the specified ONNX model path and initializes the `Preprocessor`. Each `step()`: reads a camera frame, preprocesses the RGB image into a model input tensor, runs inference to get steering and throttle predictions, creates a `ControlCommand`, sends it to the actuator, and publishes the command to the bus (for logging/display). The car drives itself in a closed loop at 20Hz.
+27. **`src/pilotnano/modes/wander.py`** — `WanderMode` is the simplest autonomous driving mode. Each `step()`: reads a camera frame, creates a `ControlCommand` with `steering=0.0` (straight) and `throttle=cfg.wander_throttle` (configurable, default 0.3 — gentle forward), passes it through the `BehaviorManager`, and sends the result to the actuator. The mode itself just says "go forward" — the behavior stack handles everything else (avoid obstacles, stop for walls, recover from stuck). This is intentionally dumb — the intelligence lives in the behaviors.
 
-24. **`scripts/export_onnx.py`** — Standalone script for converting a PyTorch checkpoint to ONNX. Usage: `python scripts/export_onnx.py --checkpoint best.pth --output model.onnx`. This is a convenience wrapper around the `export_to_onnx()` utility for when you want to re-export without re-training.
-
-**Milestone**: Copy `best.onnx` to the Jetson, run `pilotnano --mode autopilot --model best.onnx`. The car drives autonomously around the track it was trained on. Expect some wobble and corrections — this is normal for behavioral cloning and can be improved with more data and augmentation.
+**Milestone**: Place the car in an open room with furniture. Run `pilotnano --mode wander`. The car drives forward, steers around chair legs and walls, reverses out of corners, and keeps exploring indefinitely. No training, no data collection — just depth + reactive behaviors.
 
 ---
 
-### Phase 6: Tests + Developer Tooling
+### Phase 6: Object Following
+
+**Goal**: Make the car detect and follow a specific object (person, ball, another car) at a set distance using a pretrained object detector and the D435's depth stream. After this phase, you have a "follow me" car.
+
+**Why now**: The behavior manager is handling safety. The inference engine (for loading ONNX models) is needed here for the object detector. The depth analyzer provides range to the target. This is the most compelling demo capability — a car that follows you around.
+
+**What we build**:
+
+28. **`src/pilotnano/inference/engine.py`** — `InferenceEngine` wraps an ONNX Runtime `InferenceSession`. On init, it auto-detects available execution providers and prefers TensorRT (fastest on Jetson) > CUDA > CPU. Loads the ONNX model, reads input/output tensor names from metadata. `predict()` takes a preprocessed numpy array, runs inference, and returns raw outputs. On the Jetson Nano with TensorRT, inference takes ~10-15ms per frame for a small detection model — within our 50ms budget.
+
+29. **`src/pilotnano/perception/object_detector.py`** — `ObjectDetector` wraps the inference engine for object detection specifically. Takes a pretrained YOLO-Nano or MobileNet-SSD ONNX model (placed in `models/` directory). `detect(rgb_frame) -> list[Detection]` where `Detection` is a dataclass with `class_name`, `confidence`, `bbox (x1, y1, x2, y2)`. Handles preprocessing (resize to model input, normalize) and postprocessing (NMS, confidence filtering) internally. The target class to follow is configurable (e.g., `"person"`, `"sports ball"`).
+
+30. **`src/pilotnano/control/pid.py`** — `PIDController` with configurable `Kp`, `Ki`, `Kd`, output clamping, and anti-windup. Two instances are used in follow mode: one for steering (error = horizontal offset of target from frame center) and one for throttle (error = current distance minus target distance). Gains are in `configs/follow/default.yaml`.
+
+31. **`src/pilotnano/modes/follow.py`** — `FollowMode` is the object-following driving mode. Each `step()`:
+1. Read camera frame (RGB + depth).
+2. Run `ObjectDetector.detect()` on the RGB frame.
+3. Filter for the target class, pick the highest-confidence detection.
+4. If target found:
+   - Compute bearing: `(bbox_center_x - frame_center_x) / frame_width` → normalized error [-1, 1].
+   - Compute range: read depth value at bbox center from the aligned depth frame.
+   - PID steering: steer to center the target in frame.
+   - PID throttle: accelerate/decelerate to maintain target distance (configurable, default 1.5m).
+   - Create `ControlCommand(steering, throttle)`.
+5. If target lost:
+   - Configurable policy: `stop` (halt and wait), `search` (slow rotation to scan), or `last_known` (drive toward last known position for N seconds then stop).
+6. Pass command through `BehaviorManager` (so e-stop + obstacle avoidance still protect the car).
+7. Send to actuator.
+
+32. **`configs/follow/default.yaml`** — Configuration for follow mode:
+```yaml
+detector:
+  model_path: models/yolo-nano.onnx
+  target_class: person
+  confidence_threshold: 0.5
+follow:
+  target_distance: 1.5    # meters — desired distance to target
+  max_throttle: 0.4       # cap speed while following
+  lost_target_policy: stop # stop | search | last_known
+  lost_target_timeout: 3.0 # seconds before giving up search
+pid_steering:
+  kp: 0.8
+  ki: 0.0
+  kd: 0.1
+pid_throttle:
+  kp: 0.5
+  ki: 0.05
+  kd: 0.1
+```
+
+**Milestone**: Download a pretrained YOLO-Nano ONNX model, place it in `models/`. Run `pilotnano --mode follow`. Stand in front of the car — it detects you, maintains 1.5m distance, and follows as you walk. Step behind a wall — the car stops (or slowly searches). Walk toward the car — it backs up. Obstacle avoidance prevents it from crashing into furniture while following.
+
+---
+
+### Phase 7: Tests + Developer Tooling
 
 **Goal**: Add automated tests and quality-of-life tools for iterating on the project. After this phase, the project is robust, testable, and pleasant to work with.
 
@@ -210,13 +359,15 @@ pilotnano/
 
 **What we build**:
 
-25. **`tests/`** — `conftest.py` provides shared fixtures: `mock_camera`, `mock_actuator`, `local_bus`, and `sample_config` (loaded from `configs/hardware/mock.yaml`). Individual test files verify: `test_bus.py` — LocalBus subscribe/publish/unsubscribe, multiple subscribers, topic isolation. `test_hardware_mock.py` — MockCamera returns valid CameraFrame with correct shape, MockActuator records commands. `test_recorder.py` — records a few frames, verifies directory structure, CSV content, and image files exist. `test_model.py` — instantiates PilotNet, forward pass with random input, output shape is (B, 2), values in [-1, 1]. `test_inference.py` — exports PilotNet to ONNX in /tmp, loads with InferenceEngine, runs predict, verifies output shape.
+33. **`tests/`** — `conftest.py` provides shared fixtures: `mock_camera`, `mock_actuator`, `local_bus`, `sample_config`, and `depth_report_factory` (for generating test DepthReports). Individual test files:
+- `test_bus.py` — LocalBus subscribe/publish/unsubscribe, multiple subscribers, topic isolation.
+- `test_hardware_mock.py` — MockCamera returns valid CameraFrame with correct shape, MockActuator records commands.
+- `test_behavior.py` — EmergencyStop triggers at threshold, Recovery state machine transitions (MONITORING→REVERSING→TURNING→RESUMING), ObstacleAvoidance steers toward open side, BehaviorManager respects priority ordering, Passthrough forwards commands unchanged.
+- `test_depth_analyzer.py` — Zone splitting, invalid pixel filtering, min-distance computation with known depth maps.
+- `test_pid.py` — PID output correctness, anti-windup, output clamping.
+- `test_object_detector.py` — Detector loads an ONNX model, returns Detection dataclasses with correct fields (can use a tiny test model).
 
-26. **`scripts/visualize_data.py`** — Data browsing tool. Opens a collected run and displays frames with steering/throttle values overlaid as text and a visual indicator (steering as a rotated line, throttle as a bar). Arrow keys navigate between frames. Plots a histogram of steering/throttle distributions to diagnose dataset imbalance (too much straight driving). Optionally lets you mark and delete bad frames.
-
-27. **`notebooks/explore_data.ipynb`** — Jupyter notebook for interactive data exploration. Load a run, display sample frames, plot steering/throttle over time, visualize augmentations, and inspect model predictions vs ground truth. Useful for debugging training issues.
-
-28. **`Makefile`** — Developer shortcuts: `make test` (pytest), `make lint` (ruff check), `make format` (ruff format), `make train` (runs train.py with default args), `make export` (runs export_onnx.py), `make collect` (runs pilotnano in collect mode), `make drive` (runs pilotnano in autopilot mode).
+34. **`Makefile`** — Developer shortcuts: `make test` (pytest), `make lint` (ruff check), `make format` (ruff format), `make wander` (runs pilotnano in wander mode), `make follow` (runs pilotnano in follow mode).
 
 **Milestone**: `pytest tests/` passes on both laptop and Jetson. `make test && make lint` gives a clean bill of health.
 
@@ -231,60 +382,47 @@ pilotnano/
 | Config | `omegaconf` | All |
 | Inference | `onnxruntime` (or `onnxruntime-gpu`) | All |
 | Image processing | `opencv-python`, `numpy` | All |
-| Training | `torch`, `torchvision`, `onnx` | Workstation only (optional dep) |
-| Gamepad input | `pygame` | Jetson (for collect mode) |
+| Object detection | Pretrained YOLO-Nano / MobileNet-SSD (ONNX) | Downloaded, not trained |
 
 ## Verification
 
 1. **Desktop (no hardware)**: `pilotnano --mode manual --hardware mock` — shows synthetic camera frames
 2. **Jetson (hardware)**: `pilotnano --mode manual` — shows live RealSense feed, servo responds via calibrate script
-3. **Data collection**: `pilotnano --mode collect` — drive with gamepad, verify `data/runs/<timestamp>/` has images + labels.csv
-4. **Training**: `python scripts/train.py --data ./data/runs` — trains PilotNet, produces best.onnx
-5. **Autopilot**: `pilotnano --mode autopilot --model best.onnx` — car drives autonomously
-6. **Tests**: `pytest tests/` — all pass with mock hardware
+3. **Obstacle avoidance**: `pilotnano --mode wander` — car drives forward, steers around furniture, reverses out of corners
+4. **Object following**: `pilotnano --mode follow` — car follows a person at 1.5m distance, stops when target lost
+5. **Tests**: `pytest tests/` — all pass with mock hardware
 
 ---
 
 ## What's Next: Projects After the Scaffold
 
-Once the base project is working (you can collect data, train, and drive autonomously), the architecture supports many extensions. Here are concrete projects roughly ordered by complexity:
+Once the base project is working, the architecture supports many extensions:
 
-### 1. Behavioral Cloning Refinement
-- **What**: Improve the basic autopilot by collecting more diverse data (different speeds, lighting, track layouts), tuning augmentations, and experimenting with model architectures (add batch normalization, try MobileNet backbone, etc.)
-- **Leverage**: Existing collect → train → drive pipeline, just iterate on data quality and model design
-- **Depth data used**: No (RGB only)
+### 1. Behavioral Cloning (End-to-End ML Driving)
+- **What**: Add data collection mode (gamepad driving while recording camera + labels), train a PilotNet CNN to imitate your driving, deploy as an autopilot mode. The full collect → train → drive pipeline.
+- **Add**: `modes/collect.py`, `modes/autopilot.py`, `data/recorder.py`, `data/dataset.py`, `data/augmentation.py`, `model/pilotnet.py`, `model/export.py`, `perception/preprocessor.py`, `scripts/train.py`
+- **When useful**: When you want the car to learn a specific track/route that's hard to describe with rules
 
 ### 2. Lane Following with Computer Vision
-- **What**: Use classical CV (Canny edge detection, Hough line transform, or color thresholding) to detect lane lines or track edges, then use a PID controller to steer along them. No neural network needed.
-- **Leverage**: Perception module — add a `lane_detector.py` alongside the preprocessor. Control module — add a `pid_controller.py`. Wire them in a new `LaneFollowMode`.
+- **What**: Use classical CV (Canny edge detection, Hough line transform, or color thresholding) to detect lane lines or track edges, then use the PID controller to steer along them. No neural network needed.
+- **Add**: `perception/lane_detector.py`, `modes/lane_follow.py`
 - **Depth data used**: No (RGB only)
 
-### 3. Obstacle Avoidance with Depth
-- **What**: Use the RealSense D435's depth stream to detect obstacles in the car's path. Set a depth threshold (e.g., anything closer than 1 meter), find the closest obstacle's position (left/center/right), and steer away from it.
-- **Leverage**: The `CameraFrame` already includes depth. Add an `obstacle_detector.py` in perception that processes the depth map. Can be combined with behavioral cloning (override steering when an obstacle is close) or as a standalone safety layer.
-- **Depth data used**: Yes — this is the first project that uses the D435's depth capability
-
-### 4. Object Following (Follow-the-Leader)
-- **What**: Detect and track a specific object (a person, another car, a colored ball) and drive to follow it at a set distance. Uses object detection for bearing and the depth map for range.
-- **Leverage**: Add an object detector (YOLO-Nano or MobileNet-SSD via TensorRT) in perception. Use depth at the detected bounding box center to estimate distance. A PID controller maintains target distance and centers the object in frame.
-- **Depth data used**: Yes — depth provides range to the target, enabling distance-keeping
-
-### 5. Waypoint Navigation with Visual Odometry
+### 3. Waypoint Navigation with Visual Odometry
 - **What**: Drive to a sequence of waypoints using the RealSense for visual odometry (estimating position from frame-to-frame motion). No GPS needed — suitable for indoor or small outdoor areas.
-- **Leverage**: Add a `visual_odometry.py` module using OpenCV feature matching or the RealSense's built-in tracking (D435i has IMU). Planning module gets a waypoint list and generates trajectories.
+- **Add**: `perception/visual_odometry.py`, `planning/waypoint_planner.py`, `modes/navigate.py`
 - **Depth data used**: Yes — stereo depth improves visual odometry accuracy
 
-### 6. SLAM + Autonomous Exploration
+### 4. SLAM + Autonomous Exploration
 - **What**: Build a map of the environment while driving (Simultaneous Localization and Mapping), then autonomously explore unmapped areas. Uses depth + RGB for mapping.
-- **Leverage**: Integrate with ORB-SLAM3 or RTAB-Map (both support RealSense). The bus architecture makes it easy to add a SLAM node that subscribes to camera frames and publishes a map/pose. Planning module uses the map to choose frontiers to explore.
+- **Add**: Integration with ORB-SLAM3 or RTAB-Map. The bus architecture makes it easy to add a SLAM node that subscribes to camera frames and publishes a map/pose.
 - **Depth data used**: Yes — essential for 3D mapping
 
-### 7. Multi-Modal Driving (RGB + Depth Fusion)
+### 5. Multi-Modal Driving (RGB + Depth Fusion)
 - **What**: Train a neural network that takes both RGB and depth as input for more robust autonomous driving. The depth channel helps the model understand 3D scene geometry, especially in challenging lighting.
-- **Leverage**: Modify PilotNet to accept 4-channel input (RGB + depth) or use a dual-encoder architecture. The recorder already optionally saves depth frames. Update the dataset loader to include depth.
+- **Add**: Modify PilotNet to accept 4-channel input (RGB + depth) or use a dual-encoder architecture.
 - **Depth data used**: Yes — depth as an additional input channel to the neural network
 
-### 8. ROS2 Migration
+### 6. ROS2 Migration
 - **What**: Swap the `LocalBus` for a `ROS2Bus` adapter, turning each component into a ROS2 node. This enables distributed processing, RViz visualization, rosbag recording, and integration with the broader ROS ecosystem.
-- **Leverage**: The bus abstraction was designed exactly for this. Write a `ROS2Bus` class that maps topic strings to ROS2 topics, wraps `rclpy.Publisher` and `rclpy.Subscription`. No business logic changes needed.
-- **Depth data used**: N/A — infrastructure change, not a feature
+- **Add**: `bus/ros2.py` — maps topic strings to ROS2 topics, wraps `rclpy.Publisher` and `rclpy.Subscription`. No business logic changes needed.
