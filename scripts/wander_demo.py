@@ -54,6 +54,8 @@ MAX_VALID_DEPTH = 5.0        # meters — ignore further
 
 # Distances
 STOP_DISTANCE = 0.25         # meters — stop and reverse when obstacle this close
+AVOIDANCE_DISTANCE = 0.80    # meters — start steering away when obstacle this close
+AVOIDANCE_GAIN = 1.0         # how aggressively to steer (multiplier on steering)
 
 # Stuck detection — wheels commanded but depth not changing
 STUCK_TIMEOUT = 1.5           # seconds of no depth change before declaring stuck
@@ -64,12 +66,19 @@ STUCK_DEPTH_THRESHOLD = 0.02  # meters — min depth change to count as "moving"
 REVERSE_STEER_DURATION = 1.5  # seconds to reverse with steering (creates ~90° turn)
 STOP_PAUSE = 0.2              # seconds to pause (stop motor) before reversing
 
+# Reverse stuck detection — abort reverse if car isn't moving (hit rear wall)
+REVERSE_STUCK_CHECK_AFTER = 0.5   # seconds into reverse before checking
+REVERSE_STUCK_THRESHOLD = 0.03   # meters — min depth change to count as moving during reverse
+MAX_FAILED_REVERSES = 2          # after this many failed reverses, try forward+turn instead
+FORWARD_TURN_DURATION = 1.0      # seconds to drive forward with full steering
+
 
 # ─── State machine ────────────────────────────────────────────────────
 class State(enum.Enum):
     CRUISE = "cruise"         # driving forward
     STOPPING = "stopping"     # brief pause before reversing
     REVERSING = "reversing"   # backing up WITH steering (pivot away)
+    FORWARD_TURN = "fwd_turn" # drive forward with full steering (when reverse fails)
 
 
 # ─── Actuator helpers ────────────────────────────────────────────────
@@ -229,6 +238,10 @@ def main():
     prev_center = None
     depth_steady_since = None   # when center depth stopped changing
 
+    # Reverse progress tracking
+    reverse_start_depth = None  # closest depth when reverse began
+    failed_reverses = 0         # consecutive reverses that didn't help
+
     tick_period = 1.0 / LOOP_HZ
     frame_count = 0
 
@@ -273,9 +286,33 @@ def main():
                         closest, "right" if turn_direction > 0 else "left", left, center, right))
 
                 else:
-                    # Clear ahead — drive forward
-                    steering = 0.0
+                    # Clear of emergency stop — drive forward with avoidance steering
                     throttle = WANDER_THROTTLE
+
+                    # Proportional avoidance: steer away from closer side
+                    if closest < AVOIDANCE_DISTANCE:
+                        # Steer away from the closer side
+                        # Positive steering = turn right, negative = turn left
+                        # If left is closer, steer right (positive); if right is closer, steer left (negative)
+                        if left < AVOIDANCE_DISTANCE or right < AVOIDANCE_DISTANCE:
+                            # How urgent: 1.0 at STOP_DISTANCE, 0.0 at AVOIDANCE_DISTANCE
+                            urgency = 1.0 - (closest - STOP_DISTANCE) / (AVOIDANCE_DISTANCE - STOP_DISTANCE)
+                            urgency = max(0.0, min(1.0, urgency))
+                            if left < right:
+                                steering = urgency * AVOIDANCE_GAIN   # steer right (away from left wall)
+                            else:
+                                steering = -urgency * AVOIDANCE_GAIN  # steer left (away from right wall)
+                        elif center < AVOIDANCE_DISTANCE:
+                            # Center blocked but sides open — steer toward more open side
+                            urgency = 1.0 - (center - STOP_DISTANCE) / (AVOIDANCE_DISTANCE - STOP_DISTANCE)
+                            urgency = max(0.0, min(1.0, urgency))
+                            if left > right:
+                                steering = -urgency * AVOIDANCE_GAIN  # steer left
+                            else:
+                                steering = urgency * AVOIDANCE_GAIN   # steer right
+                        steering = max(-1.0, min(1.0, steering))
+                    else:
+                        steering = 0.0
 
                     # Stuck detection: depth not changing while driving
                     # Only check when obstacle is within 2m — at longer range,
@@ -308,15 +345,48 @@ def main():
                 steering = 0.0
                 throttle = 0.0
                 if elapsed > STOP_PAUSE:
-                    state = State.REVERSING
-                    maneuver_start = now
-                    print("  Reversing with steering...")
+                    if failed_reverses >= MAX_FAILED_REVERSES:
+                        # Reverse keeps failing (rear wall) — try forward+turn
+                        state = State.FORWARD_TURN
+                        maneuver_start = now
+                        # Turn opposite to reverse direction (steer away from front obstacle)
+                        failed_reverses = 0
+                        print("  Reverse failed {}x — forward+turn {} instead".format(
+                            MAX_FAILED_REVERSES, "right" if turn_direction > 0 else "left"))
+                    else:
+                        state = State.REVERSING
+                        maneuver_start = now
+                        reverse_start_depth = closest
+                        print("  Reversing with steering...")
 
             elif state == State.REVERSING:
                 # Reverse WITH steering — pivot away from obstacle
                 elapsed = now - maneuver_start
+
+                # Check if reverse is actually working (depth increasing = moving away from front obstacle)
+                # If depth hasn't increased after 0.5s, we've hit a rear wall
+                if elapsed > REVERSE_STUCK_CHECK_AFTER and reverse_start_depth is not None:
+                    depth_gain = closest - reverse_start_depth
+                    if depth_gain < REVERSE_STUCK_THRESHOLD:
+                        # Not moving — rear wall. Abort reverse.
+                        failed_reverses += 1
+                        state = State.STOPPING
+                        maneuver_start = now
+                        steering = 0.0
+                        throttle = 0.0
+                        print("  Reverse stuck (depth {:.2f}→{:.2f}m, no gain) — failed {} time(s)".format(
+                            reverse_start_depth, closest, failed_reverses))
+                        # Skip the rest of this tick
+                        send_command(kit, steering, throttle)
+                        dt = time.monotonic() - t0
+                        sleep_time = tick_period - dt
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
+                        continue
+
                 if elapsed > REVERSE_STEER_DURATION:
                     # Done reversing — check if clear now (all zones)
+                    failed_reverses = 0  # successful reverse
                     if closest > STOP_DISTANCE:
                         state = State.CRUISE
                         steering = 0.0
@@ -327,11 +397,26 @@ def main():
                     else:
                         # Still blocked — reverse+steer again, keep same direction
                         maneuver_start = now
+                        reverse_start_depth = closest
                         print("  Still blocked ({:.2f}m) — reverse+steer {} again".format(
                             closest, "right" if turn_direction > 0 else "left"))
                 else:
                     steering = turn_direction   # full lock while reversing
                     throttle = REVERSE_THROTTLE
+
+            elif state == State.FORWARD_TURN:
+                # Drive forward with full steering — escape when reverse fails
+                elapsed = now - maneuver_start
+                if elapsed > FORWARD_TURN_DURATION:
+                    state = State.CRUISE
+                    steering = 0.0
+                    throttle = WANDER_THROTTLE
+                    prev_center = None
+                    depth_steady_since = None
+                    print("  Forward+turn complete ({:.2f}m), cruising".format(closest))
+                else:
+                    steering = turn_direction
+                    throttle = TURN_THROTTLE
 
             # Send to hardware
             send_command(kit, steering, throttle)
@@ -359,6 +444,8 @@ def main():
                     color = (0, 255, 0)
                 elif state == State.STOPPING:
                     color = (0, 128, 255)
+                elif state == State.FORWARD_TURN:
+                    color = (255, 0, 255)
                 else:
                     color = (0, 0, 255)
 
