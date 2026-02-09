@@ -15,7 +15,7 @@ actuator:
   steering_min_pulse: 1000      # microseconds
   steering_max_pulse: 2000
   steering_min_angle: 30        # degrees — software limit (left)
-  steering_max_angle: 150       # degrees — software limit (right)
-  steering_center_angle: 90     # degrees — straight ahead
+  steering_max_angle: 120       # degrees — software limit (right)
+  steering_center_angle: 75     # degrees — measured straight ahead (not 90)
   steering_trim: 0.0            # normalized offset, updated by calibration
   throttle_max: 0.4             # cap for safety during development

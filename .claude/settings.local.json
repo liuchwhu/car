@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pip install:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(pip install:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nImplement Phases 1-5: foundation through obstacle avoidance\n\nPhase 1 — Foundation:\n- pyproject.toml with PEP 621, console entry point, optional deps\n- YAML configs for hardware, behavior, calibration, follow mode\n- OmegaConf config loader with merge + CLI overrides\n- Message bus: ABC + synchronous LocalBus \\(pub/sub\\)\n- Message dataclasses: CameraFrame, ControlCommand, DepthReport, Detection\n- Hardware ABCs \\(Camera, Actuator\\) with context manager support\n- Mock camera \\(synthetic gradient + fake depth\\) and mock actuator\n- Hardware factory functions \\(create_camera, create_actuator\\)\n- DrivingMode ABC + ManualMode \\(camera feed display\\)\n\nPhase 2 — Main App + Hardware Drivers:\n- CLI entry point \\(pilotnano\\) with mode switching and main loop at loop_hz\n- RealSense D435 driver \\(RGB + aligned depth, USB speed detection\\)\n- PCA9685 driver \\(I2C bus 0, ch0=steering servo, ch1=ESC continuous\\)\n  - Loads saved calibration, applies trim, clamps to servo limits\n- Logging setup, interactive calibrate.py script\n\nPhase 3 — Auto-Calibration:\n- MotionEstimator: speed from depth deltas, turn rate from optical flow\n- SteeringCalibrator: auto trim finding + steering curve measurement\n- ThrottleCalibrator: throttle-to-speed lookup table via depth\n- AutoCalibrator: orchestrates all routines, saves persistent results\n  to calibration_result.yaml \\(skips on subsequent runs\\)\n\nPhase 4 — Behavior Manager + Depth Perception:\n- DepthAnalyzer: splits depth into L/C/R zones, 5th percentile filtering\n- EmergencyStop: hard stop < 20cm with hysteresis\n- Recovery: stuck detection + reverse/turn state machine\n- ObstacleAvoidance: proportional steering toward open space\n- Passthrough: lowest priority fallback\n- BehaviorManager: priority-based arbitration, logs active behavior\n\nPhase 5 — Obstacle Avoidance + Wander:\n- WanderMode: \"go straight\" + behavior stack handles the rest\n- Makefile with dev shortcuts\n\nVerified: pip install works, all imports pass, mock hardware +\nbehavior pipeline functional test passes \\(including e-stop trigger\\).\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(expect:*)"
+    ]
+  }
+}

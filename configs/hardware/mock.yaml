@@ -10,7 +10,7 @@ actuator:
   steering_channel: 0
   throttle_channel: 1
   steering_min_angle: 30
-  steering_max_angle: 150
-  steering_center_angle: 90
+  steering_max_angle: 120
+  steering_center_angle: 75
   steering_trim: 0.0
   throttle_max: 0.4
